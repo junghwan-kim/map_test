@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <title>병원 지도</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <!-- Leaflet CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <!-- Leaflet JS -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <style>
+    body { 
+      margin: 0; 
+      font-family: Arial, sans-serif; 
+    }
+    #map { 
+      height: 100vh; 
+    }
+    .search-container {
+      position: absolute;
+      top: 20px;
+      left: 20px;
+      z-index: 1000;
+      background: white;
+      padding: 15px;
+      border-radius: 8px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+      min-width: 300px;
+    }
+    .search-input {
+      width: 100%;
+      padding: 10px;
+      border: 2px solid #ddd;
+      border-radius: 4px;
+      font-size: 14px;
+      margin-bottom: 10px;
+    }
+    .search-input:focus {
+      border-color: #007cba;
+      outline: none;
+    }
+    .search-results {
+      max-height: 200px;
+      overflow-y: auto;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      display: none;
+    }
+    .search-result-item {
+      padding: 10px;
+      cursor: pointer;
+      border-bottom: 1px solid #eee;
+    }
+    .search-result-item:hover {
+      background-color: #f5f5f5;
+    }
+    .search-result-item:last-child {
+      border-bottom: none;
+    }
+    .region-buttons {
+      display: flex;
+      gap: 5px;
+      margin-top: 10px;
+    }
+    .region-btn {
+      padding: 8px 12px;
+      background: #007cba;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 12px;
+    }
+    .region-btn:hover {
+      background: #005a87;
+    }
+  </style>
+</head>
+<body>
+    <div class="search-container">
+        <input type="text" class="search-input" placeholder="지역명 또는 기관명을 입력하세요 (예: 오사카, 홋카이도, 병원명)" id="searchInput">
+        <div class="search-results" id="searchResults"></div>
+        <div class="region-buttons">
+            <!-- 버튼들은 JavaScript로 동적 생성 -->
+        </div>
+    </div>
+    <div id="map"></div>
+
+<script>
+    // 지도 초기화 (일본 전체 보기)
+    const map = L.map('map').setView([36.5, 138], 6);
+
+    // OSM 기본 타일
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; OpenStreetMap contributors'
+    }).addTo(map);
+
+    // 전역 변수
+    let hospitalsData = [];
+    let markersGroup = L.layerGroup().addTo(map);
+    let regionsConfig = {}; // 동적으로 생성될 지역 설정
+
+    // 병원 데이터 로드 및 마커 추가
+    fetch('dumy.json')
+      .then(response => response.json())
+      .then(hospitals => {
+        hospitalsData = hospitals;
+        generateRegionsConfig(hospitals);
+        generateRegionButtons();
+        displayHospitals(hospitals);
+      })
+      .catch(error => {
+        console.error('병원 데이터 로드 중 오류:', error);
+      });
+
+    // 병원 데이터로부터 지역 설정 자동 생성
+    function generateRegionsConfig(hospitals) {
+      const regionGroups = {};
+      
+      hospitals.forEach(hospital => {
+        const region = hospital.region;
+        const prefecture = hospital.prefecture;
+        
+        if (!regionGroups[region]) {
+          regionGroups[region] = {
+            hospitals: [],
+            prefectures: new Set()
+          };
+        }
+        
+        regionGroups[region].hospitals.push(hospital);
+        regionGroups[region].prefectures.add(prefecture);
+      });
+
+      // 각 지역의 중심점과 줌 레벨 계산
+      Object.keys(regionGroups).forEach(region => {
+        const hospitals = regionGroups[region].hospitals;
+        const lats = hospitals.map(h => h.lat);
+        const lngs = hospitals.map(h => h.lng);
+        
+        const centerLat = (Math.min(...lats) + Math.max(...lats)) / 2;
+        const centerLng = (Math.min(...lngs) + Math.max(...lngs)) / 2;
+        
+        // 지역 크기에 따른 줌 레벨 결정
+        const latRange = Math.max(...lats) - Math.min(...lats);
+        const lngRange = Math.max(...lngs) - Math.min(...lngs);
+        const maxRange = Math.max(latRange, lngRange);
+        
+        let zoom;
+        if (maxRange > 5) zoom = 7;
+        else if (maxRange > 2) zoom = 9;
+        else if (maxRange > 1) zoom = 10;
+        else zoom = 11;
+        
+        regionsConfig[region] = {
+          lat: centerLat,
+          lng: centerLng,
+          zoom: zoom,
+          name: hospitals[0].region_name,
+          prefectures: Array.from(regionGroups[region].prefectures)
+        };
+      });
+    }
+
+    // 지역 버튼 동적 생성
+    function generateRegionButtons() {
+      const buttonContainer = document.querySelector('.region-buttons');
+      buttonContainer.innerHTML = ''; // 기존 버튼 제거
+      
+      Object.keys(regionsConfig).forEach(regionKey => {
+        const button = document.createElement('button');
+        button.className = 'region-btn';
+        button.textContent = regionsConfig[regionKey].name;
+        button.onclick = () => moveToRegion(regionKey);
+        buttonContainer.appendChild(button);
+      });
+      
+      // 전체보기 버튼 추가
+      const resetButton = document.createElement('button');
+      resetButton.className = 'region-btn';
+      resetButton.textContent = '전체보기';
+      resetButton.onclick = () => resetView();
+      buttonContainer.appendChild(resetButton);
+    }
+
+    // 병원 마커 표시 함수
+    function displayHospitals(hospitals) {
+      markersGroup.clearLayers();
+      
+      hospitals.forEach(h => {
+        const popupContent = `
+          <strong>${h.name}</strong><br>
+          (${h.eng_name})<br><br>
+          복막투석: ${h.bokmak_flag ? 'O' : 'X'}<br>
+          혈액투석: ${h.blood_flag ? 'O' : 'X'}<br>
+          이식 가능: ${h.esic_flag ? 'O' : 'X'}<br>
+          환자 수: ${h.patient_num}명
+        `;
+
+        L.marker([h.lat, h.lng])
+          .addTo(markersGroup)
+          .bindPopup(popupContent);
+      });
+    }
+
+    // 검색 기능
+    const searchInput = document.getElementById('searchInput');
+    const searchResults = document.getElementById('searchResults');
+
+    searchInput.addEventListener('input', function() {
+      const query = this.value.toLowerCase().trim();
+      
+      if (query.length < 1) {
+        searchResults.style.display = 'none';
+        return;
+      }
+
+      const results = [];
+      
+      // 지역명 검색 (동적)
+      Object.keys(regionsConfig).forEach(regionKey => {
+        const region = regionsConfig[regionKey];
+        if (region.name.toLowerCase().includes(query) || 
+            regionKey.toLowerCase().includes(query)) {
+          results.push({ type: 'region', name: region.name, key: regionKey });
+        }
+      });
+
+      // 현(prefecture) 검색
+      const prefectureGroups = {};
+      hospitalsData.forEach(hospital => {
+        if (hospital.prefecture_name.toLowerCase().includes(query) ||
+            hospital.prefecture.toLowerCase().includes(query)) {
+          if (!prefectureGroups[hospital.prefecture]) {
+            prefectureGroups[hospital.prefecture] = hospital;
+          }
+        }
+      });
+      
+      Object.values(prefectureGroups).forEach(hospital => {
+        results.push({ 
+          type: 'prefecture', 
+          name: hospital.prefecture_name,
+          data: hospital 
+        });
+      });
+
+      // 병원명 검색
+      hospitalsData.forEach(hospital => {
+        if (hospital.name.toLowerCase().includes(query) || 
+            hospital.eng_name.toLowerCase().includes(query)) {
+          results.push({ type: 'hospital', data: hospital });
+        }
+      });
+
+      displaySearchResults(results);
+    });
+
+    // 검색 결과 표시
+    function displaySearchResults(results) {
+      if (results.length === 0) {
+        searchResults.style.display = 'none';
+        return;
+      }
+
+      searchResults.innerHTML = '';
+      results.forEach(result => {
+        const item = document.createElement('div');
+        item.className = 'search-result-item';
+        
+        if (result.type === 'region') {
+          item.textContent = result.name;
+          item.onclick = () => {
+            moveToRegion(result.key);
+            searchResults.style.display = 'none';
+            searchInput.value = '';
+          };
+        } else if (result.type === 'prefecture') {
+          item.innerHTML = `<strong>${result.name}</strong><br><small>현 전체 보기</small>`;
+          item.onclick = () => {
+            const prefectureHospitals = hospitalsData.filter(h => h.prefecture === result.data.prefecture);
+            focusOnPrefecture(prefectureHospitals);
+            searchResults.style.display = 'none';
+            searchInput.value = '';
+          };
+        } else if (result.type === 'hospital') {
+          item.innerHTML = `<strong>${result.data.name}</strong><br><small>${result.data.eng_name}</small>`;
+          item.onclick = () => {
+            map.setView([result.data.lat, result.data.lng], 15);
+            searchResults.style.display = 'none';
+            searchInput.value = '';
+          };
+        }
+        
+        searchResults.appendChild(item);
+      });
+      
+      searchResults.style.display = 'block';
+    }
+
+    // 현(prefecture) 중심으로 지도 이동
+    function focusOnPrefecture(hospitals) {
+      if (hospitals.length === 0) return;
+      
+      const lats = hospitals.map(h => h.lat);
+      const lngs = hospitals.map(h => h.lng);
+      
+      const centerLat = (Math.min(...lats) + Math.max(...lats)) / 2;
+      const centerLng = (Math.min(...lngs) + Math.max(...lngs)) / 2;
+      
+      // 현 크기에 따른 줌 레벨 결정
+      const latRange = Math.max(...lats) - Math.min(...lats);
+      const lngRange = Math.max(...lngs) - Math.min(...lngs);
+      const maxRange = Math.max(latRange, lngRange);
+      
+      let zoom;
+      if (maxRange > 1) zoom = 9;
+      else if (maxRange > 0.5) zoom = 10;
+      else zoom = 11;
+      
+      map.setView([centerLat, centerLng], zoom);
+    }
+
+    // 지역 이동 함수
+    function moveToRegion(regionKey) {
+      if (regionsConfig[regionKey]) {
+        const region = regionsConfig[regionKey];
+        map.setView([region.lat, region.lng], region.zoom);
+      }
+    }
+
+    // 전체 보기 함수
+    function resetView() {
+      map.setView([36.5, 138], 6);
+    }
+
+    // 검색 결과 외부 클릭시 숨기기
+    document.addEventListener('click', function(e) {
+      if (!e.target.closest('.search-container')) {
+        searchResults.style.display = 'none';
+      }
+    });
+  </script>
+</body>
+</html>
